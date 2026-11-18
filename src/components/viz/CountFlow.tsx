@@ -21,12 +21,12 @@ export interface Transition {
   n: number;
 }
 
-const COLW = 178;
-const ROWH = 116;
-const PADX = 46;
+const COLW = 200;
+const ROWH = 122;
+const PADX = 24;
 const PADY = 22;
-const NW = 126;
-const NH = 66;
+const NW = 152;
+const NH = 82;
 const OUTCOME_ORDER = ["K", "BB", "Hit", "Out"];
 
 const pos = (count: string) => {
@@ -62,7 +62,7 @@ export function CountFlow({ nodes, transitions, onNodeClick }: { nodes: CountNod
     !n || !n.reached ? null : mode === "k" ? n.k / n.reached : (n.h + n.bb) / n.reached;
 
   const W = PADX * 2 + 3 * COLW + NW;
-  const H = PADY * 2 + 2 * ROWH + NH + 14;
+  const H = PADY * 2 + 2 * ROWH + NH;
 
   return (
     <div>
@@ -76,10 +76,10 @@ export function CountFlow({ nodes, transitions, onNodeClick }: { nodes: CountNod
             { value: "ob", label: "Color: On-base from here" },
           ]}
         />
-        <span>Red = higher than teammates who reached the same count, blue = lower. Click a count to see those PAs.</span>
+        <span>Red = higher than teammates who reached the same count, blue = lower. “ends” = PAs that finished at that count (K, BB, H, Out). Click a count to see those PAs.</span>
       </div>
       <div className="overflow-x-auto">
-        <svg viewBox={`0 0 ${W} ${H}`} className="mx-auto block h-auto w-full min-w-[680px] max-w-[880px]" role="img" aria-label="Count flow diagram">
+        <svg viewBox={`0 0 ${W} ${H}`} className="mx-auto block h-auto w-full min-w-[720px] max-w-[900px]" role="img" aria-label="Count flow diagram">
           <defs>
             <marker id="cf-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
               <path d="M0,0 L10,5 L0,10 z" fill="var(--color-ink-3)" />
@@ -113,8 +113,8 @@ export function CountFlow({ nodes, transitions, onNodeClick }: { nodes: CountNod
             const fill = mine !== null && team !== null ? divergingFill(mine - team, 0.2) : "var(--color-surface-3)";
             const end = ended.get(n.count) ?? {};
             const endText = OUTCOME_ORDER.filter((k) => end[k])
-              .map((k) => `${end[k]} ${k === "Hit" ? "H" : k}`)
-              .join(" · ");
+              .map((k) => `${end[k]}${k === "Hit" ? "H" : k}`)
+              .join(" ");
             return (
               <g key={n.count} onClick={() => onNodeClick?.(n.count)} className={onNodeClick ? "cursor-pointer" : undefined}>
                 <title>{`${n.count}: ${n.reached} PAs reached this count. K ${n.k}, BB ${n.bb}, H ${n.h}/${n.ab} AB.${team !== null ? ` Teammates: ${pct(team)}` : ""}`}</title>
@@ -134,8 +134,8 @@ export function CountFlow({ nodes, transitions, onNodeClick }: { nodes: CountNod
                   {fouls.get(n.count) ? ` · ${fouls.get(n.count)} fouls` : ""}
                 </text>
                 {endText ? (
-                  <text x={p.x + NW / 2} y={p.y + NH + 12} fontSize={9.5} textAnchor="middle" className="num fill-ink-3">
-                    ended here: {endText}
+                  <text x={p.x + 8} y={p.y + 69} fontSize={10} className="num fill-ink-2">
+                    ends {endText}
                   </text>
                 ) : null}
               </g>

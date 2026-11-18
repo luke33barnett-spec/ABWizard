@@ -34,7 +34,9 @@ disagree, **A wins**.
 | Claude 3.7 / 3.5 Sonnet, or OpenAI | **Anthropic SDK only**, default model `claude-sonnet-5-5` (override with `ANTHROPIC_MODEL`) | 3.x Sonnet models are retired. One provider keeps the tool-use loop simple. Without a key, the Local Smart Query Parser + SQL Playground keep the app fully functional. |
 | `shadcn/ui` via CLI | shadcn-style components written in `src/components/ui/` (Radix + `cva` + `tailwind-merge`) | The shadcn registry is unreachable from the build sandbox; the components follow the same copy-in-source pattern. |
 | `enriched_pitches` SQL view | View `enriched_pitches_view` + **materialized table `enriched_pitches`** rebuilt after every ingest | Window functions (incl. cumulative sequence strings) are computed once, not on every scanner/query call. Always query `enriched_pitches`. |
-| OPFS / IndexedDB persistence | Normalized `pitches` table exported to **Parquet** and stored in **IndexedDB**; restored on load | Compact, fast, and portable across browsers (OPFS sync handles are still inconsistent). |
+| PapaParse / Apache Arrow ingestion | PapaParse → schema mapper → staging CSV → DuckDB **core `read_csv`** with explicit column types | In DuckDB-WASM 1.32 the JSON and Parquet readers are *runtime-downloaded extensions* (fetched from extensions.duckdb.org): they fail offline/behind proxies and leak requests to a third party. Extension autoloading is disabled; only core DuckDB is used. |
+| OPFS / IndexedDB persistence | `pitches_raw` exported with core `COPY … (FORMAT CSV)`, **gzipped** (CompressionStream) and stored in **IndexedDB**; restored with the same `read_csv` path on load | Same core-only reason as above; round-trip losslessness is regression-tested. |
+| — | Auto-Scout compares count/pitch-type habits to **teammates in the same cell**; sequence effects to the hitter's **complement** (his other comparable pitches) and they must also separate him from teammates | Removes universal effects ("everyone takes 3-0", "everyone Ks more after 0-1") so cards are hitter-specific. z-score thresholds tighten for small samples. |
 
 ### A.3 Metric vocabulary (used everywhere — UI, scanner, AI prompt)
 
@@ -70,21 +72,39 @@ src/lib/schema-mapper.ts        TrackMan/TruMedia header aliases + value normali
 src/lib/duckdb.ts               client-only DuckDB-WASM singleton (Web Worker), query helpers
 src/lib/sql/schema.ts           pitches DDL, enriched view SQL, schema description for the LLM
 src/lib/ingest.ts               CSV files → mapper → DuckDB (dedupe by pitch_uid) → persistence
-src/lib/persistence.ts          IndexedDB Parquet snapshot save/restore
+src/lib/persistence.ts          IndexedDB key/value wrapper (gzipped CSV snapshot lives in duckdb.ts)
 src/lib/mock-data.ts            seeded synthetic TrackMan/TruMedia CSV generator w/ planted tendencies
 src/lib/filters.ts              global filters → SQL WHERE
 src/lib/metrics.ts              shared SQL metric fragments + formatters
 src/lib/tendency-scanner.ts     deterministic Auto-Scout query suite + ranking
 src/lib/local-query-parser.ts   offline NL → SQL builder (no API key)
+src/lib/sql-guard.ts            read-only single-statement check + filter-scoping CTE for untrusted SQL
+src/lib/ai/prompt.ts            server-only system prompt + strict tools (run_sql, present_answer)
+src/lib/ai/client.ts            browser tool-use loop (runs SQL locally, sends ≤100-row summaries)
+scripts/verify-pipeline.ts      end-to-end regression checks (npm run verify:data)
 src/app/api/analyze/route.ts    Claude tool-use text-to-SQL relay (schema + question only; never raw CSV)
 src/components/...              dashboard, hitter profile panels, StrikeZonePlot, workbench, PA inspector
 ```
 
-### A.5 Guardrails
+### A.5 Data conventions worth knowing
+
+- **PlateLocSide sign.** Alabama's real TrackMan exports put + toward **third base** (verified in the sister app against RelSide: RHP +1.38 ft, LHP −2.02 ft). The mapper checks each file: if right-handed pitchers' mean `RelSide` is positive it flips side into catcher's view; without `RelSide`, TrackMan files are assumed flipped and TruMedia/Statcast-style `PlateX` is taken as-is. The health modal shows which rule each file used.
+- **Missing PA counters** (some TruMedia exports): a new PA starts when the half-inning or batter changes or the count resets to 0-0.
+- **Dedupe:** `pitch_uid` = TrackMan `PitchUID`, else a synthesized game|inning|half|PA|pitch|batter key. The same game exported by both TrackMan and TruMedia is *not* merged (different game ids).
+- **Team filter:** default `batter_team = 'ALA_CRI'`; the filter bar's "All" shows every batter (opponent scouting).
+- **Base state** exists only when the export has runner columns (TruMedia); TrackMan rows have `base_state = NULL`.
+
+### A.6 Verification
+
+`npm run verify:data` runs `scripts/verify-pipeline.ts` with native DuckDB **1.4.3** (the same engine version as DuckDB-WASM 1.32.0): demo CSV → mapper → SQL, integrity checks on every derived column, every panel SQL builder, the Auto-Scout rediscovering each tendency planted in `mock-data.ts`, the offline parser on all starter questions, the SQL guard, and the snapshot round-trip. Run it after touching the mapper, SQL, scanner or parser.
+
+### A.7 Guardrails
 
 - **Never** import `@duckdb/duckdb-wasm` in a Server Component or route handler. All DuckDB access goes through `src/lib/duckdb.ts`, which only runs in the browser.
 - `/api/analyze` receives schema, distinct values, the question, and small aggregated result sets — never uploaded CSV payloads.
-- LLM-generated SQL is validated client-side as a single read-only `SELECT`/`WITH` statement before execution.
+- LLM-generated SQL is validated client-side as a single read-only `SELECT`/`WITH` statement before execution, then wrapped in a CTE that shadows `enriched_pitches` with the global filters so the filter bar always applies.
+- `/api/analyze`: model + system prompt + tools are fixed server-side (clients send only messages), bodies are size/count-capped, and `ABWIZARD_ACCESS_CODE` should be set on any public deployment. Forced `tool_choice` is not used (rejected by current Claude models); tools are `strict`.
+- Never re-enable DuckDB extension autoloading; stick to core SQL (CSV, window functions, lists).
 
 ---
 

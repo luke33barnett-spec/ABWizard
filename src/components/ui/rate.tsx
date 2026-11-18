@@ -23,7 +23,7 @@ export function RateText({
   return (
     <span className={cn("num whitespace-nowrap", stacked && "inline-flex flex-col items-end leading-tight", className)}>
       <span className="text-ink">{pct}%</span>
-      <span className={cn(stacked ? "text-[10px] text-ink-2" : "ml-1 text-[0.85em] text-ink-3")}>
+      <span className={cn(stacked ? "text-[10px] text-ink/70" : "ml-1 text-[0.85em] text-ink/65")}>
         ({num}/{r.den})
       </span>
     </span>

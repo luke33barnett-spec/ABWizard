@@ -25,7 +25,7 @@ export function divergingFill(delta: number | null | undefined, span = 0.25): st
 /** Single-hue sequential fill (blue) for magnitudes 0..1. */
 export function sequentialFill(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return `rgb(${MID.join(", ")})`;
-  return mix(MID, LO, Math.max(0, Math.min(1, v)));
+  return mix(MID, LO, Math.max(0, Math.min(1, v)) * 0.8);
 }
 
 export const GROUP_COLOR: Record<string, string> = {

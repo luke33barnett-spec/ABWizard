@@ -10,6 +10,8 @@ import { runTendencyScan, type Insight } from "../src/lib/tendency-scanner";
 import { buildWhere, DEFAULT_FILTERS } from "../src/lib/filters";
 import * as Q from "../src/lib/queries";
 import { readRawCsvSql } from "../src/lib/sql/schema";
+import { planLocalQuery, summarizeLocal, STARTER_QUESTIONS } from "../src/lib/local-query-parser";
+import { checkReadOnly, scopeSql } from "../src/lib/sql-guard";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -96,6 +98,28 @@ async function main() {
       console.log(`FAIL panel sql ${name}: ${(e as Error).message.split("\n")[0]}`);
       failures.push(`panel ${name}`);
     }
+  }
+
+  // Ask ABWizard offline parser: every starter question must produce SQL that passes the guard and runs.
+  const hitters = (await db.query<{ batter_name: string }>("SELECT DISTINCT batter_name FROM enriched_pitches WHERE batter_team = 'ALA_CRI'")).map((r) => r.batter_name);
+  for (const q of [...STARTER_QUESTIONS, "Does Mercer chase sliders down and away with two strikes after an elevated fastball?", "Who freezes the most on first pitch fastballs?"]) {
+    const plan = planLocalQuery(q, { hitters, focusHitter: q.includes("Mercer") || q.startsWith("Who") ? null : "Tidwell, Jace" });
+    const results: Record<string, Record<string, unknown>[]> = {};
+    let err = "";
+    for (const lq of [...plan.queries, { key: "viz", sql: plan.vizSql, purpose: "viz" }]) {
+      const g = checkReadOnly(lq.sql);
+      if (!g.ok) { err = `guard: ${g.error}`; break; }
+      try { results[lq.key] = await db.query(scopeSql(g.sql, W)); } catch (e) { err = (e as Error).message.split("\n")[0]; break; }
+    }
+    const s = err ? null : summarizeLocal(plan, results);
+    const ok = !err && (results.main?.length ?? 0) > 0;
+    console.log(`${ok ? "PASS" : "FAIL"} local parser [${plan.kind}/${plan.metric}/${plan.visualization}] "${q}"\n     → ${err || s?.headline}`);
+    if (!ok) failures.push(`local parser: ${q}`);
+  }
+  for (const bad of ["DROP TABLE pitches", "SELECT 1; SELECT 2", "SELECT * FROM read_csv('x')", "COPY pitches TO 'x.csv'"]) {
+    const g = checkReadOnly(bad);
+    console.log(`${g.ok ? "FAIL" : "PASS"} guard rejects: ${bad}`);
+    if (g.ok) failures.push(`guard allowed: ${bad}`);
   }
 
   // Snapshot round-trip (what the browser stores in IndexedDB): COPY TO CSV → read_csv back.
