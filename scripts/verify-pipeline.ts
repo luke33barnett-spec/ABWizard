@@ -116,6 +116,22 @@ async function main() {
     console.log(`${ok ? "PASS" : "FAIL"} local parser [${plan.kind}/${plan.metric}/${plan.visualization}] "${q}"\n     → ${err || s?.headline}`);
     if (!ok) failures.push(`local parser: ${q}`);
   }
+  // Parser regressions from real coach questions.
+  const planCase = async (q: string, focus: string | null, expect: (p: ReturnType<typeof planLocalQuery>, headline: string) => boolean) => {
+    const plan = planLocalQuery(q, { hitters, focusHitter: focus });
+    const results: Record<string, Record<string, unknown>[]> = {};
+    for (const lq of plan.queries) results[lq.key] = await db.query(scopeSql(checkReadOnly(lq.sql).ok ? lq.sql : "SELECT 1", W));
+    const head = summarizeLocal(plan, results).headline;
+    const ok = expect(plan, head);
+    console.log(`${ok ? "PASS" : "FAIL"} parser case "${q}"\n     → ${head}`);
+    if (!ok) failures.push(`parser case: ${q}`);
+  };
+  await planCase("What pitch makes Jace freeze up the most in two strike counts", null, (p, h) =>
+    p.hitter === "Tidwell, Jace" && p.groupBy === "pitch_type" && p.rank === "desc" && p.metric === "freeze" && !p.queries[0].sql.includes("loc_vertical") && /highest Freeze% .*by pitch type is/.test(h));
+  await planCase("Who chases the most with two strikes?", "Tidwell, Jace", (p, h) => p.hitter === null && p.groupBy === "batter_name" && p.metric === "chase" && /by hitter is/.test(h));
+  await planCase("Where does Mercer chase the most?", null, (p) => p.hitter === "Mercer, Cole" && p.groupBy === "location_label");
+  await planCase("Which count does Okafor freeze the least in?", null, (p) => p.hitter === "Okafor, Miles" && p.groupBy === "count_str" && p.rank === "asc");
+
   for (const bad of ["DROP TABLE pitches", "SELECT 1; SELECT 2", "SELECT * FROM read_csv('x')", "COPY pitches TO 'x.csv'"]) {
     const g = checkReadOnly(bad);
     console.log(`${g.ok ? "FAIL" : "PASS"} guard rejects: ${bad}`);

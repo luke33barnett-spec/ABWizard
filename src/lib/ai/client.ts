@@ -84,6 +84,19 @@ function parseAnswer(input: unknown): AskAnswer | null {
   return { headline: i.headline, answer: i.answer, keyNumbers: kn, visualization: viz, vizSql: i.viz_sql, logic: typeof i.logic === "string" ? i.logic : "" };
 }
 
+/** Error from /api/analyze carrying its HTTP status (503/429/504 = temporary, worth retrying). */
+export class AskError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+  get temporary(): boolean {
+    return this.status === 0 || this.status === 429 || this.status === 503 || this.status === 504 || this.status === 502;
+  }
+}
+
 export interface AnalyzeStatus {
   enabled: boolean;
   provider: "anthropic" | "gemini" | null;
@@ -114,13 +127,18 @@ export async function askAI(opts: {
   let nudged = false;
 
   for (let iter = 0; iter < MAX_STEPS; iter++) {
-    const res = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(opts.accessCode ? { "x-abwizard-access": opts.accessCode } : {}) },
-      body: JSON.stringify({ messages }),
-    });
+    let res: Response;
+    try {
+      res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(opts.accessCode ? { "x-abwizard-access": opts.accessCode } : {}) },
+        body: JSON.stringify({ messages }),
+      });
+    } catch {
+      throw new AskError("Could not reach the server.", 0);
+    }
     const data = (await res.json().catch(() => ({}))) as { content?: Block[]; stop_reason?: string; model?: string; label?: string; error?: string };
-    if (!res.ok || !data.content) throw new Error(data.error ?? `Analyze request failed (${res.status})`);
+    if (!res.ok || !data.content) throw new AskError(data.error ?? `Analyze request failed (${res.status})`, res.ok ? 502 : res.status);
     model = data.model;
     provider = data.label;
     if (data.stop_reason === "refusal") throw new Error(`${provider ?? "The AI"} declined this request. Try rephrasing the question.`);

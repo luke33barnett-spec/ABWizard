@@ -180,8 +180,8 @@ async function main() {
     assert.equal(captured.length - before, 2);
   });
 
-  const errCase = async (status: number, message: string, expectStatus: number, expectText: RegExp) => {
-    queue.push({ status, json: { error: { code: status, message, status: "X" } } });
+  const errCase = async (status: number, message: string, expectStatus: number, expectText: RegExp, times = 1) => {
+    for (let i = 0; i < times; i++) queue.push({ status, json: { error: { code: status, message, status: "X" } } });
     const res = await post([{ role: "user", content: "q" }]);
     const j = (await res.json()) as { error: string };
     assert.equal(res.status, expectStatus, j.error);
@@ -189,7 +189,72 @@ async function main() {
   };
   await check("route → invalid Gemini key maps to a clear 502", () => errCase(400, "API key not valid. Please pass a valid API key.", 502, /Gemini API key was rejected/));
   await check("route → unknown model maps to a clear 400", () => errCase(404, "models/nope is not found", 400, /GEMINI_MODEL/));
-  await check("route → rate limit maps to 429", () => errCase(429, "Resource exhausted", 429, /Rate limited/));
+  // ---- overload handling: retries, fallback models, conversation pinning
+  process.env.GEMINI_RETRY_BASE_MS = "5";
+  const ok = (name = "run_sql") => ({ status: 200, json: { candidates: [{ content: { parts: [{ functionCall: { name, args: { sql: "SELECT 1", purpose: "p" } }, thoughtSignature: "c2ln" }] }, finishReason: "STOP" }] } });
+  const busy = { status: 503, json: { error: { code: 503, message: "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.", status: "UNAVAILABLE" } } };
+  const urlsSince = (n: number) => captured.slice(n).map((c) => c.url.match(/models\/([^:]+):/)?.[1]);
+
+  await check("Gemini 503 is retried on the same model, then succeeds", async () => {
+    const n = captured.length;
+    queue.push(busy, ok());
+    const res = await post([{ role: "user", content: "q" }]);
+    assert.equal(res.status, 200);
+    assert.deepEqual(urlsSince(n), ["gemini-3.8-flash", "gemini-3.8-flash"]);
+  });
+
+  let fallbackTurn: Record<string, unknown> | null = null;
+  await check("Gemini overloaded on the main model → falls back to gemini-3.7-flash and pins it", async () => {
+    const n = captured.length;
+    queue.push(busy, busy, busy, ok());
+    const res = await post([{ role: "user", content: "q" }]);
+    assert.equal(res.status, 200);
+    assert.deepEqual(urlsSince(n), ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.7-flash"]);
+    fallbackTurn = (await res.json()) as Record<string, unknown>;
+    const raw = (fallbackTurn.content as Block[]).find((b) => b.type === "gemini_parts")!;
+    assert.equal(raw.model, "gemini-3.7-flash");
+  });
+
+  await check("Follow-up turns stay on the model that started the conversation", async () => {
+    const tu = (fallbackTurn!.content as Block[]).find((b) => b.type === "tool_use")!;
+    const n = captured.length;
+    queue.push(ok("present_answer"));
+    const res = await post([
+      { role: "user", content: "q" },
+      { role: "assistant", content: fallbackTurn!.content },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: tu.id, content: "{}" }] },
+    ]);
+    assert.equal(res.status, 200);
+    assert.deepEqual(urlsSince(n), ["gemini-3.7-flash"]);
+  });
+
+  await check("A retired/missing fallback (404) is skipped", async () => {
+    const n = captured.length;
+    queue.push(busy, busy, busy, { status: 404, json: { error: { code: 404, message: "models/gemini-3.7-flash is not found", status: "NOT_FOUND" } } }, ok());
+    const res = await post([{ role: "user", content: "q" }]);
+    assert.equal(res.status, 200);
+    assert.equal(urlsSince(n).at(-1), "gemini-flash-lite-latest");
+  });
+
+  await check("Rate limit on the main model moves straight to the next model", async () => {
+    const n = captured.length;
+    queue.push({ status: 429, json: { error: { code: 429, message: "Resource exhausted", status: "RESOURCE_EXHAUSTED" } } }, ok());
+    const res = await post([{ role: "user", content: "q" }]);
+    assert.equal(res.status, 200);
+    assert.deepEqual(urlsSince(n), ["gemini-3.8-flash", "gemini-3.7-flash"]);
+  });
+
+  await check("Everything overloaded → readable 503 (no raw JSON)", async () => {
+    queue.push(busy, busy, busy, busy, busy, busy, busy);
+    const res = await post([{ role: "user", content: "q" }]);
+    const j = (await res.json()) as { error: string };
+    assert.equal(res.status, 503);
+    assert.match(j.error, /^Gemini is overloaded right now/);
+    assert.ok(!j.error.includes("{"), j.error);
+    queue.length = 0;
+  });
+
+  await check("route → rate limit on every model maps to 429", () => errCase(429, "Resource exhausted", 429, /rate limit reached/, 3));
 
   await check("route → access code enforced when set", async () => {
     process.env.ABWIZARD_ACCESS_CODE = "tide";

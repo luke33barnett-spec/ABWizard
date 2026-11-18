@@ -128,7 +128,8 @@ export function fromGeminiResponse(resp: GenerateContentResponse, model: string,
       content.push({ type: "text", text: p.text });
     }
   }
-  content.push({ type: "gemini_parts", parts });
+  // `model` pins later turns of this conversation to the model that produced these signatures.
+  content.push({ type: "gemini_parts", parts, model });
 
   let stop: NeutralResponse["stop_reason"] = hasCall ? "tool_use" : "end_turn";
   if (finish === "MAX_TOKENS") stop = "max_tokens";

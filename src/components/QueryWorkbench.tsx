@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Bot, Code2, Cpu, Loader2, Play, Send, Sparkles } from "lucide-react";
+import { Bot, Code2, Cpu, Loader2, Play, RotateCcw, Send, Sparkles } from "lucide-react";
 import { useData } from "@/components/providers/DataProvider";
 import { useDuckQuery } from "@/hooks/useDuckQuery";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
@@ -13,7 +13,7 @@ import { Markdown } from "@/components/ask/Markdown";
 import { ResultVisual } from "@/components/ask/ResultVisual";
 import { DataTable } from "@/components/ask/DataTable";
 import { CsvDropzone } from "@/components/data/CsvDropzone";
-import { askAI, getAnalyzeStatus, runGuarded, type AnalyzeStatus, type AskOutcome, type AskStep, type Visualization } from "@/lib/ai/client";
+import { AskError, askAI, getAnalyzeStatus, runGuarded, type AnalyzeStatus, type AskOutcome, type AskStep, type Visualization } from "@/lib/ai/client";
 import { planLocalQuery, STARTER_QUESTIONS, summarizeLocal } from "@/lib/local-query-parser";
 import { DISTINCT_VALUE_COLUMNS } from "@/lib/sql/schema";
 import { describeFilters } from "@/lib/filters";
@@ -26,6 +26,8 @@ interface Entry extends AskOutcome {
   question: string;
   ms: number;
   notice?: string;
+  /** The AI failed for a temporary reason; offer a one-click retry. */
+  retryable?: boolean;
 }
 
 const ACCESS_KEY = "abwizard.accessCode";
@@ -197,7 +199,8 @@ export function QueryWorkbench() {
           entry = { ...out, id: Date.now(), question: q, ms: performance.now() - t0 };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          entry = await runLocal(q, `${aiLabel} was unavailable (${msg}). Answered with the local parser instead.`);
+          entry = await runLocal(q, `${aiLabel} couldn't answer: ${msg} Showing the offline parser's answer instead.`);
+          entry.retryable = err instanceof AskError ? err.temporary : true;
         }
       } else {
         entry = await runLocal(q);
@@ -375,6 +378,9 @@ export function QueryWorkbench() {
               e={e}
               minN={filters.minN}
               where={where}
+              retryLabel={useAI ? aiLabel : null}
+              busy={busy}
+              onRetry={(q) => void ask(q)}
               onOpenSql={(s) => {
                 setSql(s);
                 setTab("sql");
@@ -453,7 +459,23 @@ export function QueryWorkbench() {
   );
 }
 
-function AnswerCard({ e, minN, where, onOpenSql }: { e: Entry; minN: number; where: string; onOpenSql: (sql: string) => void }) {
+function AnswerCard({
+  e,
+  minN,
+  where,
+  onOpenSql,
+  retryLabel,
+  busy,
+  onRetry,
+}: {
+  e: Entry;
+  minN: number;
+  where: string;
+  onOpenSql: (sql: string) => void;
+  retryLabel: string | null;
+  busy: boolean;
+  onRetry: (question: string) => void;
+}) {
   return (
     <Card>
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-line px-4 py-3">
@@ -464,7 +486,16 @@ function AnswerCard({ e, minN, where, onOpenSql }: { e: Entry; minN: number; whe
         </div>
       </div>
       <CardBody className="space-y-4">
-        {e.notice ? <p className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-xs text-warn">{e.notice}</p> : null}
+        {e.notice ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-warn/40 bg-warn/10 px-2.5 py-1.5 text-xs text-warn">
+            <span className="min-w-0 flex-1">{e.notice}</span>
+            {e.retryable && retryLabel ? (
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => onRetry(e.question)}>
+                <RotateCcw aria-hidden /> Try {retryLabel} again
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         <div>
           <h3 className="text-base font-semibold leading-snug text-ink">{e.headline}</h3>
           {e.keyNumbers.length ? (

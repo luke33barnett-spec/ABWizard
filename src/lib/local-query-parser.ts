@@ -6,7 +6,7 @@
  * locations, previous-pitch clauses, pitcher hand and the question's intent,
  * then fills SQL templates. Every SQL statement is shown to the user.
  */
-import { METRICS, PITCH_GROUP_PLURAL, PITCH_TYPE_PLURAL, PITCH_TYPE_SINGULAR, PITCH_GROUP_SINGULAR, displayName, pct, sqlStr, type MetricKey } from "@/lib/metrics";
+import { METRICS, PITCH_GROUP_PLURAL, PITCH_TYPE_NAME, PITCH_TYPE_PLURAL, PITCH_TYPE_SINGULAR, PITCH_GROUP_SINGULAR, displayName, pct, sqlStr, type MetricKey } from "@/lib/metrics";
 import type { AskAnswer, KeyNumber, Visualization } from "@/lib/ai/client";
 import type { Row } from "@/lib/ingest";
 
@@ -27,7 +27,9 @@ export interface LocalPlan {
   visualization: Visualization;
   vizSql: string;
   logic: string;
-  groupBy: "count_str" | "batter_name" | null;
+  groupBy: "count_str" | "batter_name" | "pitch_type" | "location_label" | null;
+  /** "what pitch / which count / where / who … the most" — rank the groups by the metric */
+  rank: "desc" | "asc" | null;
   streakN?: number;
 }
 
@@ -122,6 +124,8 @@ function detectMetric(q: string): MetricKey {
 export function planLocalQuery(question: string, ctx: { hitters: string[]; focusHitter: string | null }): LocalPlan {
   const raw = question.trim();
   let q = ` ${raw.toLowerCase().replace(/[’']/g, "'")} `;
+  // Idioms whose "up" is not a location: "freeze up", "locks him up", "tied up", "set up"…
+  q = q.replace(/\b(freez\w*|froze\w*|lock(?:s|ed|ing)?|tie[sd]?|tying|jam(?:s|med|ming)?|set(?:s|ting)?|give[sn]?|gave|match(?:es|ed)?|pick(?:s|ed)?|show(?:s|ed)?|eat(?:s)?|mess(?:es|ed)?)\s+(him\s+|them\s+)?up\b/g, "$1");
 
   // --- hitter
   let hitter: string | null = null;
@@ -132,7 +136,18 @@ export function planLocalQuery(question: string, ctx: { hitters: string[]; focus
       break;
     }
   }
-  hitter ??= ctx.focusHitter;
+  if (!hitter) {
+    // First name alone ("Jace") when it's unique on the roster.
+    const byFirst = ctx.hitters.filter((h) => {
+      const first = h.split(",")[1]?.trim().toLowerCase();
+      return !!first && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(q);
+    });
+    if (byFirst.length === 1) hitter = byFirst[0];
+  }
+  const named = hitter !== null;
+  // "Who …" / "which hitter …" compares hitters, so ignore the focus hitter.
+  const askWho = /\bwho\b|\b(which|what) (hitter|player|guy|batter)s?\b/.test(q);
+  if (!named && !askWho) hitter = ctx.focusHitter;
 
   // --- counts (strip the phrases so "strikes" in "two strikes" isn't read as a zone word)
   const countConds: string[] = [];
@@ -191,6 +206,13 @@ export function planLocalQuery(question: string, ctx: { hitters: string[]; focus
   else if (/\b(show|list|find|give)\b.*\b(every|all|each)\b|\bevery (pa|at[- ]bat|plate appearance)|which (pas|at[- ]bats)/.test(q)) kind = "list";
   else if (/react|reaction|what does he do|how does he (handle|respond)|approach/.test(q)) kind = "reaction";
   const metric = detectMetric(q);
+  let rankBy: "pitch_type" | "count_str" | "location_label" | null = null;
+  if (kind === "rate") {
+    if (/\b(what|which)\s+(pitch(es)?|pitch types?|kinds? of pitch(es)?|types? of pitch(es)?)\b|\bby pitch( type)?\b/.test(q)) rankBy = "pitch_type";
+    else if (/\b(what|which)\s+counts?\b|\bin what count|\bby count\b/.test(q)) rankBy = "count_str";
+    else if (/\b(what|which)\s+(locations?|zones?|spots?|part of the zone|areas?)\b|\bby (location|zone)\b|\bwhere\b/.test(q)) rankBy = "location_label";
+  }
+  const rankDir: LocalPlan["rank"] = rankBy || askWho ? (/\b(least|lowest|fewest|rarely|least often)\b/.test(q) ? "asc" : "desc") : null;
 
   const hitterCond = hitter ? `batter_name = ${sqlStr(hitter)}` : null;
   const pitchConds = [...cur.conds, ...prev.conds];
@@ -199,7 +221,11 @@ export function planLocalQuery(question: string, ctx: { hitters: string[]; focus
   const subjectBits = [cur.words.join(" ") || "pitches", countWords.join(" "), prev.words.length ? `right after ${/^[aeiou]/.test(prev.words.join(" ")) ? "an" : "a"} ${prev.words.join(" ")}` : "", handWord];
   const subject = subjectBits.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
   const m = METRICS[metric];
-  const groupBy: LocalPlan["groupBy"] = explicit.length > 1 ? "count_str" : !hitter ? "batter_name" : null;
+  const groupBy: LocalPlan["groupBy"] = rankBy ?? (explicit.length > 1 ? "count_str" : !hitter ? "batter_name" : null);
+  const pitchTypeLabel = `CASE pitch_type ${Object.entries(PITCH_TYPE_NAME)
+    .map(([k, v]) => `WHEN '${k}' THEN '${v} (${k})'`)
+    .join(" ")} ELSE coalesce(pitch_type, 'Unknown') END`;
+  const groupExpr = groupBy === "pitch_type" ? pitchTypeLabel : groupBy;
   const pointCols = `pitch_uid, pa_uid, CAST(game_date AS VARCHAR) AS game_date, batter_name, pitcher_name, pitcher_throws, count_str, pitch_type, pitch_group, pitch_call,
     rel_speed, plate_loc_side, plate_loc_height, prev_pitch_type, prev_plate_loc_side, prev_plate_loc_height, exit_speed, launch_angle, play_result, pa_result, pa_pitch_seq, pitch_sequence_str`;
 
@@ -209,13 +235,18 @@ export function planLocalQuery(question: string, ctx: { hitters: string[]; focus
   let logic = "";
 
   const rateSql = (den: string, num: string, extraWhere = "TRUE") => {
-    const gsel = groupBy ? `${groupBy} AS label, ` : "'All' AS label, ";
+    const gsel = groupBy ? `${groupExpr} AS label, ` : "'All' AS label, ";
+    const order = rankDir
+      ? `\nGROUP BY ALL\nHAVING count(*) FILTER (WHERE ${den}) > 0\nORDER BY num::DOUBLE / den ${rankDir === "asc" ? "ASC" : "DESC"}, den DESC`
+      : groupBy
+        ? `\nGROUP BY ALL\nORDER BY den DESC`
+        : "";
     return `SELECT ${gsel}count(*) FILTER (WHERE (${den}) AND (${num})) AS num,
   count(*) FILTER (WHERE ${den}) AS den,
   count(DISTINCT pa_uid) FILTER (WHERE ${den}) AS pas
 FROM enriched_pitches
 WHERE ${W}
-  AND (${extraWhere})${groupBy ? `\nGROUP BY ALL\nORDER BY den DESC` : ""}`;
+  AND (${extraWhere})${groupBy ? `\n  AND ${groupBy} IS NOT NULL` : ""}${order}`;
   };
 
   switch (kind) {
@@ -324,7 +355,7 @@ ORDER BY game_date DESC, pa_uid, pa_pitch_seq`;
         visualization = "count_matrix";
         vizSql = `SELECT count_str, count(*) FILTER (WHERE (${m.den}) AND (${m.num})) AS num, count(*) FILTER (WHERE ${m.den}) AS den
 FROM enriched_pitches WHERE ${W} GROUP BY 1`;
-      } else if (groupBy === "batter_name") {
+      } else if (groupBy) {
         visualization = "bar";
         vizSql = queries[0].sql;
       } else {
@@ -340,7 +371,8 @@ ORDER BY game_date DESC, pa_uid, pa_pitch_seq`;
   }
 
   const condText = allConds.length ? `Conditions: ${allConds.join(" AND ")}.` : "No conditions recognized — this covers every pitch in scope.";
-  return { kind, metric, hitter, subject, queries, visualization, vizSql, logic: `${logic} ${condText} Parsed locally (no AI).`, groupBy, streakN };
+  const rankText = rankDir && groupBy ? ` Groups (${groupBy}) are ranked by ${m.label}, ${rankDir === "asc" ? "lowest" : "highest"} first.` : "";
+  return { kind, metric, hitter, subject, queries, visualization, vizSql, logic: `${logic}${rankText} ${condText} Parsed locally (no AI).`, groupBy, rank: rankDir, streakN };
 }
 
 function r(num: number, den: number) {
@@ -411,6 +443,26 @@ export function summarizeLocal(plan: LocalPlan, results: Record<string, Row[]>):
     default: {
       const num = rows.reduce((s, x) => s + n(x.num), 0);
       const den = rows.reduce((s, x) => s + n(x.den), 0);
+      if (plan.rank && plan.groupBy) {
+        const groupBy = plan.groupBy;
+        const MIN = 5;
+        const labelOf = (x: Row) => (groupBy === "batter_name" ? displayName(String(x.label)) : String(x.label));
+        const eligible = rows.filter((x) => n(x.den) >= MIN);
+        const pool = eligible.length ? eligible : rows;
+        const lead = pool[0];
+        const dimWord = { pitch_type: "pitch type", location_label: "location", count_str: "count", batter_name: "hitter" }[groupBy];
+        const dir = plan.rank === "asc" ? "Lowest" : "Highest";
+        const scope = plan.subject && plan.subject !== "pitches" ? ` on ${plan.subject}` : "";
+        if (lead) keyNumbers.push({ label: `${labelOf(lead)} ${m.label}`, num: n(lead.num), den: n(lead.den) });
+        const lines = rows.slice(0, 8).map((x) => `- ${labelOf(x)}: ${r(n(x.num), n(x.den))}${n(x.den) < MIN ? " — small sample" : ""}`);
+        return {
+          headline: lead
+            ? `${who}: ${dir.toLowerCase()} ${m.label}${scope} by ${dimWord} is ${labelOf(lead)} at ${r(n(lead.num), n(lead.den))}.`
+            : `No pitches matched${scope}.`,
+          answer: `${lines.join("\n")}${eligible.length ? `\n\nRanked among ${dimWord}s with at least ${MIN} pitches in the denominator.` : ""}`,
+          keyNumbers,
+        };
+      }
       keyNumbers.push({ label: m.label, num, den });
       const ranked = [...rows].filter((x) => n(x.den) >= 5).sort((a, b) => n(b.num) / n(b.den) - n(a.num) / n(a.den));
       const lines =
