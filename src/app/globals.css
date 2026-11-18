@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/*
+ * ABWizard design tokens — institutional dark analytics UI with Alabama
+ * Crimson Tide accents (CLAUDE.md §B.6). Crimson is a CHROME color (buttons,
+ * active states, brand); data marks use the validated chart palette below.
+ * Chart palette validated with the dataviz validator against #0f1522
+ * (all-pairs, CVD-safe): fb/brk/off.
+ */
+@theme {
+  --color-bg: #090d16;
+  --color-surface: #0f1522;
+  --color-surface-2: #141c2c;
+  --color-surface-3: #1b2538;
+  --color-line: #1f2a3d;
+  --color-line-strong: #2c3a52;
+  --color-ink: #e6e9ef;
+  --color-ink-2: #a8b0be;
+  --color-ink-3: #737c8e;
+
+  --color-crimson: #9e1b32;
+  --color-crimson-hi: #b8223d;
+  --color-crimson-text: #f07a8f;
+  --color-capstone: #828a8f;
+
+  /* Data: pitch groups (categorical, all-pairs validated) */
+  --color-fb: #3987e5;
+  --color-brk: #d95926;
+  --color-off: #199e70;
+
+  /* Data: diverging poles (vs-team deltas) + neutral midpoint */
+  --color-div-lo: #2a78d6;
+  --color-div-mid: #262d3a;
+  --color-div-hi: #c6403f;
+
+  /* Status (reserved; always paired with an icon/label) */
+  --color-good: #0ca30c;
+  --color-warn: #fab219;
+  --color-serious: #ec835a;
+  --color-critical: #d03b3b;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular numerals everywhere numbers line up. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-crimson) 60%, transparent);
+}
+
+/* Thin, quiet scrollbars for dense tables. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+@keyframes abw-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+.skeleton {
+  animation: abw-pulse 1.6s ease-in-out infinite;
+  background: var(--color-surface-3);
+  border-radius: 6px;
+}
