@@ -1,11 +1,10 @@
 import "server-only";
-import type Anthropic from "@anthropic-ai/sdk";
 import { ENRICHED_COLUMNS } from "@/lib/sql/schema";
 
 /**
- * Static system prompt + tools for /api/analyze. Kept byte-stable across
- * requests (dataset-specific context goes in the first user message) so the
- * prefix caches.
+ * Static system prompt + tool specs for /api/analyze, shared by every AI
+ * provider (Claude, Gemini). Kept byte-stable across requests (dataset context
+ * goes in the first user message) so provider-side prompt caching works.
  */
 const SCHEMA = ENRICHED_COLUMNS.map((c) => `- ${c.name} (${c.type}): ${c.desc}`).join("\n");
 
@@ -45,52 +44,56 @@ Choosing the visualization in present_answer
 - bar: a rate compared across categories. viz_sql returns label, num, den, ordered for reading.
 - table: anything else (lists of PAs, multi-column breakdowns). Include pa_uid when rows are PAs or pitches so coaches can click into them.`;
 
-const runSql: Anthropic.Beta.BetaTool = {
-  name: "run_sql",
-  description:
-    "Run one read-only DuckDB SELECT/WITH query against enriched_pitches (already scoped to the coach's filters) in the coach's browser. Returns JSON with columns, row_count and up to 100 rows, or an error message to fix.",
-  strict: true,
-  input_schema: {
-    type: "object",
-    properties: {
-      sql: { type: "string", description: "A single read-only DuckDB query. No trailing semicolon." },
-      purpose: { type: "string", description: "One short sentence: what this query checks." },
-    },
-    required: ["sql", "purpose"],
-    additionalProperties: false,
-  },
-};
+export interface ToolSpec {
+  name: "run_sql" | "present_answer";
+  description: string;
+  /** JSON Schema for the tool input (objects closed with additionalProperties: false). */
+  schema: Record<string, unknown>;
+}
 
-const presentAnswer: Anthropic.Beta.BetaTool = {
-  name: "present_answer",
-  description: "Finish the turn: give the coach the scouting answer plus one visualization. Call exactly once, after the numbers are verified with run_sql.",
-  strict: true,
-  input_schema: {
-    type: "object",
-    properties: {
-      headline: { type: "string", description: "One numbers-first sentence answering the question, rates as pct (num/den)." },
-      answer: { type: "string", description: "Short scouting answer in Markdown (at most ~120 words; bullets welcome). Every rate as pct (num/den)." },
-      key_numbers: {
-        type: "array",
-        description: "The 1-4 most important rates behind the answer.",
-        items: {
-          type: "object",
-          properties: {
-            label: { type: "string" },
-            num: { type: "integer" },
-            den: { type: "integer" },
-          },
-          required: ["label", "num", "den"],
-          additionalProperties: false,
-        },
+export const TOOL_SPECS: ToolSpec[] = [
+  {
+    name: "run_sql",
+    description:
+      "Run one read-only DuckDB SELECT/WITH query against enriched_pitches (already scoped to the coach's filters) in the coach's browser. Returns JSON with columns, row_count and up to 100 rows, or an error message to fix.",
+    schema: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "A single read-only DuckDB query. No trailing semicolon." },
+        purpose: { type: "string", description: "One short sentence: what this query checks." },
       },
-      visualization: { type: "string", enum: ["strike_zone", "count_matrix", "bar", "table"] },
-      viz_sql: { type: "string", description: "Read-only query whose rows feed the visualization (see the column requirements in the instructions)." },
-      logic: { type: "string", description: "1-3 sentences on how the SQL answers the question: filters, definitions, caveats." },
+      required: ["sql", "purpose"],
+      additionalProperties: false,
     },
-    required: ["headline", "answer", "key_numbers", "visualization", "viz_sql", "logic"],
-    additionalProperties: false,
   },
-};
-
-export const TOOLS: Anthropic.Beta.BetaTool[] = [runSql, presentAnswer];
+  {
+    name: "present_answer",
+    description: "Finish the turn: give the coach the scouting answer plus one visualization. Call exactly once, after the numbers are verified with run_sql.",
+    schema: {
+      type: "object",
+      properties: {
+        headline: { type: "string", description: "One numbers-first sentence answering the question, rates as pct (num/den)." },
+        answer: { type: "string", description: "Short scouting answer in Markdown (at most ~120 words; bullets welcome). Every rate as pct (num/den)." },
+        key_numbers: {
+          type: "array",
+          description: "The 1-4 most important rates behind the answer.",
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string" },
+              num: { type: "integer" },
+              den: { type: "integer" },
+            },
+            required: ["label", "num", "den"],
+            additionalProperties: false,
+          },
+        },
+        visualization: { type: "string", enum: ["strike_zone", "count_matrix", "bar", "table"] },
+        viz_sql: { type: "string", description: "Read-only query whose rows feed the visualization (see the column requirements in the instructions)." },
+        logic: { type: "string", description: "1-3 sentences on how the SQL answers the question: filters, definitions, caveats." },
+      },
+      required: ["headline", "answer", "key_numbers", "visualization", "viz_sql", "logic"],
+      additionalProperties: false,
+    },
+  },
+];

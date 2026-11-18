@@ -13,7 +13,7 @@ import { Markdown } from "@/components/ask/Markdown";
 import { ResultVisual } from "@/components/ask/ResultVisual";
 import { DataTable } from "@/components/ask/DataTable";
 import { CsvDropzone } from "@/components/data/CsvDropzone";
-import { askClaude, getAnalyzeStatus, runGuarded, type AskOutcome, type AskStep, type Visualization } from "@/lib/ai/client";
+import { askAI, getAnalyzeStatus, runGuarded, type AnalyzeStatus, type AskOutcome, type AskStep, type Visualization } from "@/lib/ai/client";
 import { planLocalQuery, STARTER_QUESTIONS, summarizeLocal } from "@/lib/local-query-parser";
 import { DISTINCT_VALUE_COLUMNS } from "@/lib/sql/schema";
 import { describeFilters } from "@/lib/filters";
@@ -87,7 +87,7 @@ function guessViz(rows: Row[]): Visualization {
 
 export function QueryWorkbench() {
   const { status, hitters, where, filters, query } = useData();
-  const [ai, setAi] = useState<{ enabled: boolean; model: string; requiresAccessCode: boolean } | null>(null);
+  const [ai, setAi] = useState<AnalyzeStatus | null>(null);
   const [forceLocal, setForceLocal] = useState(false);
   const [accessCode, setAccessCode] = useState("");
   const [focus, setFocus] = useState("");
@@ -140,9 +140,11 @@ export function QueryWorkbench() {
     ].join("\n");
   }, [distinct.data, hitters, filters, focus]);
 
-  const useClaude = !!ai?.enabled && !forceLocal;
+  const useAI = !!ai?.enabled && !forceLocal;
+  const aiLabel = ai?.label || "AI";
   const last = entries[0];
-  const canFollowUp = useClaude && last?.mode === "claude" && !!last.messages;
+  // Follow-ups continue a conversation only with the provider that started it.
+  const canFollowUp = useAI && last?.mode === "ai" && last.provider === ai?.label && !!last.messages;
 
   async function runLocal(q: string, notice?: string): Promise<Entry> {
     const t0 = performance.now();
@@ -180,10 +182,10 @@ export function QueryWorkbench() {
     setProgress([]);
     try {
       let entry: Entry;
-      if (useClaude) {
+      if (useAI) {
         const t0 = performance.now();
         try {
-          const out = await askClaude({
+          const out = await askAI({
             question: q,
             contextBlock,
             where,
@@ -195,7 +197,7 @@ export function QueryWorkbench() {
           entry = { ...out, id: Date.now(), question: q, ms: performance.now() - t0 };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          entry = await runLocal(q, `Claude was unavailable (${msg}). Answered with the local parser instead.`);
+          entry = await runLocal(q, `${aiLabel} was unavailable (${msg}). Answered with the local parser instead.`);
         }
       } else {
         entry = await runLocal(q);
@@ -240,9 +242,9 @@ export function QueryWorkbench() {
         <div className="flex flex-wrap items-center gap-2 text-xs">
           {ai === null ? (
             <Badge tone="neutral">checking AI…</Badge>
-          ) : useClaude ? (
+          ) : useAI ? (
             <Badge tone="crimson">
-              <Bot className="size-3" aria-hidden /> Claude · {ai.model}
+              <Bot className="size-3" aria-hidden /> {aiLabel} · {ai.model}
             </Badge>
           ) : (
             <Badge tone="info">
@@ -286,7 +288,7 @@ export function QueryWorkbench() {
                     ))}
                   </select>
                 </label>
-                {ai?.requiresAccessCode && useClaude ? (
+                {ai?.requiresAccessCode && useAI ? (
                   <label className="flex items-center gap-2 text-xs text-ink-3">
                     Access code
                     <input
@@ -354,7 +356,7 @@ export function QueryWorkbench() {
               {busy ? (
                 <div className="rounded-md border border-line bg-surface-2 p-2 text-xs text-ink-2" role="status">
                   <div className="flex items-center gap-2">
-                    <Loader2 className="size-3.5 animate-spin text-crimson-text" aria-hidden /> {useClaude ? "Claude is writing and running SQL in your browser…" : "Parsing and running locally…"}
+                    <Loader2 className="size-3.5 animate-spin text-crimson-text" aria-hidden /> {useAI ? `${aiLabel} is writing and running SQL in your browser…` : "Parsing and running locally…"}
                   </div>
                   {progress.map((s, i) => (
                     <div key={i} className="num mt-1 truncate text-ink-3">
@@ -457,7 +459,7 @@ function AnswerCard({ e, minN, where, onOpenSql }: { e: Entry; minN: number; whe
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-line px-4 py-3">
         <p className="min-w-0 flex-1 text-sm text-ink-2">“{e.question}”</p>
         <div className="flex items-center gap-1.5">
-          <Badge tone={e.mode === "claude" ? "crimson" : "info"}>{e.mode === "claude" ? `Claude${e.model ? ` · ${e.model}` : ""}` : "Local parser"}</Badge>
+          <Badge tone={e.mode === "ai" ? "crimson" : "info"}>{e.mode === "ai" ? `${e.provider ?? "AI"}${e.model ? ` · ${e.model}` : ""}` : "Local parser"}</Badge>
           <span className="num text-[11px] text-ink-3">{(e.ms / 1000).toFixed(1)}s</span>
         </div>
       </div>

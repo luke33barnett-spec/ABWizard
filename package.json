@@ -10,11 +10,13 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/copy-duckdb-assets.mjs",
-    "verify:data": "tsx scripts/verify-pipeline.ts"
+    "verify:data": "tsx scripts/verify-pipeline.ts",
+    "verify:ai": "tsx --conditions=react-server scripts/verify-ai.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.10.0",
     "@duckdb/duckdb-wasm": "1.32.0",
+    "@google/genai": "^3.5.0",
     "class-variance-authority": "^0.7.1",
     "client-only": "^0.0.1",
     "clsx": "^2.1.1",
@@ -43,6 +45,6 @@
     "typescript": "^5"
   },
   "engines": {
-    "node": ">=20.9"
+    "node": ">=22"
   }
 }

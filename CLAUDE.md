@@ -31,7 +31,7 @@ disagree, **A wins**.
 |---|---|---|
 | Next.js 15 | **Next.js 16.4** (App Router, Turbopack, `cacheComponents`) | 15 is backport-only; the sister app already runs 16 on Vercel. Read `node_modules/next/dist/docs/` before changing framework code. |
 | `next.config.mjs` webpack WASM rules | DuckDB-WASM bundles **self-hosted** from `public/duckdb/` (copied from `node_modules` by `scripts/copy-duckdb-assets.mjs` on `postinstall`/`prebuild`; gitignored) | No bundler WASM handling needed, works identically under Turbopack and on Vercel, no CDN dependency. |
-| Claude 3.7 / 3.5 Sonnet, or OpenAI | **Anthropic SDK only**, default model `claude-sonnet-5-5` (override with `ANTHROPIC_MODEL`) | 3.x Sonnet models are retired. One provider keeps the tool-use loop simple. Without a key, the Local Smart Query Parser + SQL Playground keep the app fully functional. |
+| Claude 3.7 / 3.5 Sonnet, or OpenAI | **Two providers, chosen by server env: Gemini** (`@google/genai`, `GEMINI_API_KEY`, default `gemini-3.8-flash`, override `GEMINI_MODEL`) **or Claude** (`@anthropic-ai/sdk`, `ANTHROPIC_API_KEY`, default `claude-sonnet-5-5`, override `ANTHROPIC_MODEL`). `AI_PROVIDER` picks when both keys are set (Claude otherwise). No OpenAI. | Owner asked for Gemini support; 3.x Sonnet models are retired. Both share one system prompt + tool specs (`src/lib/ai/prompt.ts`) and return the same provider-neutral turn, so the browser loop is provider-agnostic. Without a key, the Local Smart Query Parser + SQL Playground keep the app fully functional. |
 | `shadcn/ui` via CLI | shadcn-style components written in `src/components/ui/` (Radix + `cva` + `tailwind-merge`) | The shadcn registry is unreachable from the build sandbox; the components follow the same copy-in-source pattern. |
 | `enriched_pitches` SQL view | View `enriched_pitches_view` + **materialized table `enriched_pitches`** rebuilt after every ingest | Window functions (incl. cumulative sequence strings) are computed once, not on every scanner/query call. Always query `enriched_pitches`. |
 | PapaParse / Apache Arrow ingestion | PapaParse → schema mapper → staging CSV → DuckDB **core `read_csv`** with explicit column types | In DuckDB-WASM 1.32 the JSON and Parquet readers are *runtime-downloaded extensions* (fetched from extensions.duckdb.org): they fail offline/behind proxies and leak requests to a third party. Extension autoloading is disabled; only core DuckDB is used. |
@@ -79,9 +79,12 @@ src/lib/metrics.ts              shared SQL metric fragments + formatters
 src/lib/tendency-scanner.ts     deterministic Auto-Scout query suite + ranking
 src/lib/local-query-parser.ts   offline NL → SQL builder (no API key)
 src/lib/sql-guard.ts            read-only single-statement check + filter-scoping CTE for untrusted SQL
-src/lib/ai/prompt.ts            server-only system prompt + strict tools (run_sql, present_answer)
+src/lib/ai/prompt.ts            server-only system prompt + provider-neutral tool specs (run_sql, present_answer)
+src/lib/ai/providers.ts         server-only provider selection + Claude/Gemini callers (error mapping)
+src/lib/ai/gemini-translate.ts  pure conversation ↔ Gemini contents translation (thought signatures preserved)
 src/lib/ai/client.ts            browser tool-use loop (runs SQL locally, sends ≤100-row summaries)
 scripts/verify-pipeline.ts      end-to-end regression checks (npm run verify:data)
+scripts/verify-ai.ts            provider checks through the real SDKs with fetch stubbed (npm run verify:ai)
 src/app/api/analyze/route.ts    Claude tool-use text-to-SQL relay (schema + question only; never raw CSV)
 src/components/...              dashboard, hitter profile panels, StrikeZonePlot, workbench, PA inspector
 ```
@@ -96,14 +99,14 @@ src/components/...              dashboard, hitter profile panels, StrikeZonePlot
 
 ### A.6 Verification
 
-`npm run verify:data` runs `scripts/verify-pipeline.ts` with native DuckDB **1.4.3** (the same engine version as DuckDB-WASM 1.32.0): demo CSV → mapper → SQL, integrity checks on every derived column, every panel SQL builder, the Auto-Scout rediscovering each tendency planted in `mock-data.ts`, the offline parser on all starter questions, the SQL guard, and the snapshot round-trip. Run it after touching the mapper, SQL, scanner or parser.
+`npm run verify:data` runs `scripts/verify-pipeline.ts` with native DuckDB **1.4.3** (the same engine version as DuckDB-WASM 1.32.0): demo CSV → mapper → SQL, integrity checks on every derived column, every panel SQL builder, the Auto-Scout rediscovering each tendency planted in `mock-data.ts`, the offline parser on all starter questions, the SQL guard, and the snapshot round-trip. Run it after touching the mapper, SQL, scanner or parser. `npm run verify:ai` checks the AI providers offline (translation unit tests + the real SDKs and POST handler with `fetch` stubbed); run it after touching anything in `src/lib/ai/` or the route.
 
 ### A.7 Guardrails
 
 - **Never** import `@duckdb/duckdb-wasm` in a Server Component or route handler. All DuckDB access goes through `src/lib/duckdb.ts`, which only runs in the browser.
 - `/api/analyze` receives schema, distinct values, the question, and small aggregated result sets — never uploaded CSV payloads.
 - LLM-generated SQL is validated client-side as a single read-only `SELECT`/`WITH` statement before execution, then wrapped in a CTE that shadows `enriched_pitches` with the global filters so the filter bar always applies.
-- `/api/analyze`: model + system prompt + tools are fixed server-side (clients send only messages), bodies are size/count-capped, and `ABWIZARD_ACCESS_CODE` should be set on any public deployment. Forced `tool_choice` is not used (rejected by current Claude models); tools are `strict`.
+- `/api/analyze`: model + system prompt + tools are fixed server-side (clients send only messages), bodies are size/count-capped, and `ABWIZARD_ACCESS_CODE` should be set on any public deployment. Claude: forced `tool_choice` is not used (rejected by current Claude models); tools are `strict`. Gemini: function calling mode `ANY` (every turn is a tool call), JSON-Schema declarations, and each model turn's raw `parts` travel with the conversation as a `gemini_parts` block so `thoughtSignature`s are replayed verbatim — never strip or rebuild them.
 - Never re-enable DuckDB extension autoloading; stick to core SQL (CSV, window functions, lists).
 
 ---

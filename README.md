@@ -13,7 +13,7 @@ All pitch data stays in the browser. CSVs are parsed and queried locally with **
 | **Team** | Roster table (PA, slash line, K%, looking K%, BB%, Swing%, **Freeze%**, Heart Freeze%, Chase%, Whiff%, 1st-pitch swing%, 2-strike whiff%, Hard-Hit%), each cell tinted vs the roster average. |
 | **Hitter profile** (`/hitters/[name]`) | **Counts**: 12-count matrix (swing/take/freeze/chase/whiff/foul/hard-hit, any pitch type) vs teammates in the same count, count × pitch-type grid, and a count-flow diagram of how his PAs move and end. **Freeze Report**: freeze% by count, pitch type, previous pitch, two-strike location, zone, plus every called third strike. **Sequencing & Tunnels**: previous → current pitch matrix, reaction after whiffs, freezes and takes, velo-gap traps, Hard/Soft archetypes. **Situational**: vs RHP/LHP, outs, runners, PA # in game, repeat looks, innings. **Auto-Scout**, **Zone**, and **PA Log** tabs. |
 | **Auto-Scout** | One click runs 31 parameterized SQL probes and ranks hitter-specific findings with significance tests. Findings are grouped into count locks, freeze alerts, chase triggers, 2-pitch tunnels, velo/sightline traps, sequence archetypes, first-pitch, two-strike, situational, and damage. Every card shows `pct (num/den)`, the sample, the delta vs its baseline, and **Visualize & Inspect PAs**. |
-| **Ask ABWizard** | Ask a question in plain English and get the DuckDB SQL behind the answer, run in the browser: an executive answer, a strike zone / count matrix / bar visual, and the generated SQL drawer. It uses Claude if `ANTHROPIC_API_KEY` is set and an offline **Local Smart Query Parser** otherwise. It also has a **SQL Playground**. |
+| **Ask ABWizard** | Ask a question in plain English and get the DuckDB SQL behind the answer, run in the browser: an executive answer, a strike zone / count matrix / bar visual, and the generated SQL drawer. It uses **Gemini** (`GEMINI_API_KEY`) or **Claude** (`ANTHROPIC_API_KEY`) when a key is set, and an offline **Local Smart Query Parser** otherwise. It also has a **SQL Playground**. |
 | **Data** | CSV drop zone (1–50+ files), dataset health and schema-mapping report, column dictionary, clear data. |
 
 Clicking any pitch, count cell, bar or row opens the **PA Sequence Inspector**: a numbered pitch-by-pitch replay on the strike zone with velo, location, call, and result.
@@ -27,12 +27,15 @@ npm run dev          # http://localhost:3000
 
 Click **Load Demo Alabama Hitter Dataset**, a seeded, simulated 40-game season with fictional hitters and planted tendencies, or drop real exports.
 
-Optional, in `.env.local` (see `.env.example`):
+Optional, in `.env.local` (see `.env.example`). Set **one** AI key:
 
 ```bash
-ANTHROPIC_API_KEY=...          # enables Claude in Ask ABWizard
+GEMINI_API_KEY=...             # Gemini (default model gemini-3.8-flash; override with GEMINI_MODEL)
+# or
+ANTHROPIC_API_KEY=...          # Claude (default model claude-sonnet-5-5; override with ANTHROPIC_MODEL)
+
 ABWIZARD_ACCESS_CODE=...       # recommended on any public URL
-# ANTHROPIC_MODEL=claude-sonnet-5-5
+# AI_PROVIDER=gemini           # only needed if both keys are set (Claude wins otherwise)
 ```
 
 ## Checks
@@ -42,14 +45,17 @@ npm run lint
 npm run typecheck
 npm run verify:data   # demo CSVs → mapper → DuckDB (native 1.4.3, same engine as the browser) → every derived column,
                       # every panel query, the Auto-Scout re-finding each planted tendency, the offline parser, SQL guard
+npm run verify:ai     # Gemini/Claude providers through the real SDKs + /api/analyze, network stubbed (no keys needed)
 npm run build
 ```
 
 ## Deploying to Vercel
 
-1. Import `luke33barnett-spec/ABWizard` in Vercel (framework preset: Next.js, default build command).
-2. Optionally set `ANTHROPIC_API_KEY` and `ABWIZARD_ACCESS_CODE` under **Settings → Environment Variables**.
-3. Deploy. The DuckDB-WASM bundles are copied from `node_modules` during `postinstall`/`prebuild`, so nothing large is committed.
+1. Import `luke33barnett-spec/ABWizard` in Vercel (framework preset: Next.js, default build command, Node.js 22+).
+2. Under **Settings → Environment Variables**, optionally set `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY`) and `ABWIZARD_ACCESS_CODE`, then **redeploy**. Vercel applies variables only to new deployments.
+3. Check `https://<your-site>/api/analyze`. It shows which provider and model are active.
+
+The DuckDB-WASM bundles are copied from `node_modules` during `postinstall`/`prebuild`, so nothing large is committed.
 
 ## Data notes
 
@@ -61,4 +67,4 @@ npm run build
 
 ## Stack
 
-Next.js 16 (App Router, Turbopack, Cache Components) · TypeScript strict · Tailwind CSS 4 · shadcn-style components on Radix · Lucide · DuckDB-WASM 1.32 (core features only, no runtime extension downloads) · PapaParse · Anthropic SDK (tool use, strict tools).
+Next.js 16 (App Router, Turbopack, Cache Components) · TypeScript strict · Tailwind CSS 4 · shadcn-style components on Radix · Lucide · DuckDB-WASM 1.32 (core features only, no runtime extension downloads) · PapaParse · Google Gen AI SDK (Gemini function calling) and Anthropic SDK (Claude tool use).

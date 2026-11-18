@@ -1,8 +1,10 @@
 /**
- * Browser side of Ask ABWizard: the tool-use loop. Claude proposes SQL via
+ * Browser side of Ask ABWizard: the tool-use loop. The AI (Claude or Gemini,
+ * chosen server-side) proposes SQL via
  * run_sql; we validate it (read-only, single statement), scope it to the
  * global filters, run it in DuckDB-WASM and send back a small JSON summary.
- * The loop ends when Claude calls present_answer.
+ * The loop ends when the model calls present_answer. The conversation format
+ * is provider-neutral; /api/analyze translates for Gemini.
  */
 import type Anthropic from "@anthropic-ai/sdk";
 import { checkReadOnly, scopeSql } from "@/lib/sql-guard";
@@ -33,7 +35,9 @@ export interface AskAnswer {
 }
 
 export interface AskOutcome extends AskAnswer {
-  mode: "claude" | "local";
+  mode: "ai" | "local";
+  /** Provider label ("Claude", "Gemini") for AI answers */
+  provider?: string;
   model?: string;
   steps: AskStep[];
   vizRows: Row[];
@@ -80,7 +84,15 @@ function parseAnswer(input: unknown): AskAnswer | null {
   return { headline: i.headline, answer: i.answer, keyNumbers: kn, visualization: viz, vizSql: i.viz_sql, logic: typeof i.logic === "string" ? i.logic : "" };
 }
 
-export async function askClaude(opts: {
+export interface AnalyzeStatus {
+  enabled: boolean;
+  provider: "anthropic" | "gemini" | null;
+  label: string;
+  model: string;
+  requiresAccessCode: boolean;
+}
+
+export async function askAI(opts: {
   question: string;
   contextBlock: string;
   where: string;
@@ -98,6 +110,7 @@ export async function askClaude(opts: {
 
   const steps: AskStep[] = [];
   let model: string | undefined;
+  let provider: string | undefined;
   let nudged = false;
 
   for (let iter = 0; iter < MAX_STEPS; iter++) {
@@ -106,10 +119,11 @@ export async function askClaude(opts: {
       headers: { "Content-Type": "application/json", ...(opts.accessCode ? { "x-abwizard-access": opts.accessCode } : {}) },
       body: JSON.stringify({ messages }),
     });
-    const data = (await res.json().catch(() => ({}))) as { content?: Block[]; stop_reason?: string; model?: string; error?: string };
+    const data = (await res.json().catch(() => ({}))) as { content?: Block[]; stop_reason?: string; model?: string; label?: string; error?: string };
     if (!res.ok || !data.content) throw new Error(data.error ?? `Analyze request failed (${res.status})`);
     model = data.model;
-    if (data.stop_reason === "refusal") throw new Error("Claude declined this request. Try rephrasing the question.");
+    provider = data.label;
+    if (data.stop_reason === "refusal") throw new Error(`${provider ?? "The AI"} declined this request. Try rephrasing the question.`);
     if (data.stop_reason === "max_tokens") throw new Error("The answer ran past the output limit. Try a narrower question.");
 
     // Echo the assistant turn back unchanged (thinking/fallback blocks included).
@@ -119,18 +133,18 @@ export async function askClaude(opts: {
     const answerUse = toolUses.find((t) => t.name === "present_answer");
     if (answerUse) {
       const answer = parseAnswer(answerUse.input);
-      if (!answer) throw new Error("Claude returned an incomplete answer.");
+      if (!answer) throw new Error(`${provider ?? "The AI"} returned an incomplete answer.`);
       const viz = await runGuarded(opts.query, answer.vizSql, opts.where, 5000);
       // Placeholder results so a follow-up question can continue this conversation.
       messages.push({
         role: "user",
         content: toolUses.map((t) => ({ type: "tool_result" as const, tool_use_id: t.id, content: t.name === "present_answer" ? "Shown to the coach." : "Skipped." })),
       });
-      return { ...answer, mode: "claude", model, steps, vizRows: viz.rows, vizError: viz.error, messages };
+      return { ...answer, mode: "ai", provider, model, steps, vizRows: viz.rows, vizError: viz.error, messages };
     }
 
     if (toolUses.length === 0) {
-      if (nudged) throw new Error("Claude did not return a structured answer.");
+      if (nudged) throw new Error(`${provider ?? "The AI"} did not return a structured answer.`);
       nudged = true;
       messages.push({ role: "user", content: [{ type: "text", text: "Please finish by calling present_answer (run_sql first if you still need numbers)." }] });
       continue;
@@ -165,12 +179,12 @@ export async function askClaude(opts: {
   throw new Error("Stopped after too many query steps. Try a more specific question.");
 }
 
-export async function getAnalyzeStatus(): Promise<{ enabled: boolean; model: string; requiresAccessCode: boolean }> {
+export async function getAnalyzeStatus(): Promise<AnalyzeStatus> {
   try {
     const res = await fetch("/api/analyze", { method: "GET", cache: "no-store" });
     if (!res.ok) throw new Error();
-    return (await res.json()) as { enabled: boolean; model: string; requiresAccessCode: boolean };
+    return (await res.json()) as AnalyzeStatus;
   } catch {
-    return { enabled: false, model: "", requiresAccessCode: false };
+    return { enabled: false, provider: null, label: "", model: "", requiresAccessCode: false };
   }
 }

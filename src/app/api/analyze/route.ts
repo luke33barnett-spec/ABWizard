@@ -1,20 +1,17 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { connection } from "next/server";
 import { z } from "zod";
-import { SYSTEM_PROMPT, TOOLS } from "@/lib/ai/prompt";
+import { callAnthropic, callGemini, ProviderError, resolveProvider } from "@/lib/ai/providers";
+import type { ConvMessage } from "@/lib/ai/gemini-translate";
 
 /**
  * Ask ABWizard relay. The browser runs the tool loop: it sends the
  * conversation (question + small SQL result summaries — never raw CSVs), we
- * call Claude with a fixed system prompt + tools, and return the assistant
- * turn. run_sql tool calls are executed client-side in DuckDB-WASM.
+ * call the configured AI provider (Claude or Gemini) with a fixed system prompt
+ * + tools, and return the assistant turn. run_sql calls execute client-side in
+ * DuckDB-WASM.
  */
 export const maxDuration = 60;
 
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
-// Server-side refusal fallback ("default" routing) exists only on the 5.x generation.
-const SUPPORTS_FALLBACK = /^claude-(sonnet-5-5|opus-5-5|opus-5|fable-5(-[12])?)$/.test(MODEL);
-const SUPPORTS_EFFORT = /^claude-(sonnet-5|sonnet-5-5|opus-5|opus-5-5|opus-4-[5-8]|fable-5|haiku-5-5)/.test(MODEL);
 const MAX_BODY_BYTES = 600_000;
 
 const Body = z.object({
@@ -31,9 +28,12 @@ const Body = z.object({
 
 export async function GET() {
   await connection(); // evaluate env at request time, not at build
+  const cfg = resolveProvider();
   return Response.json({
-    enabled: Boolean(process.env.ANTHROPIC_API_KEY),
-    model: MODEL,
+    enabled: cfg.provider !== null,
+    provider: cfg.provider,
+    label: cfg.label,
+    model: cfg.model,
     requiresAccessCode: Boolean(process.env.ABWIZARD_ACCESS_CODE),
   });
 }
@@ -43,7 +43,8 @@ function error(status: number, message: string) {
 }
 
 export async function POST(req: Request) {
-  if (!process.env.ANTHROPIC_API_KEY) return error(501, "ANTHROPIC_API_KEY is not configured on the server. Using the local query parser instead.");
+  const cfg = resolveProvider();
+  if (!cfg.provider) return error(501, "No AI key is configured on the server (ANTHROPIC_API_KEY or GEMINI_API_KEY). Using the local query parser instead.");
   const code = process.env.ABWIZARD_ACCESS_CODE;
   if (code && req.headers.get("x-abwizard-access") !== code) return error(401, "This deployment requires an ABWizard access code.");
 
@@ -57,31 +58,12 @@ export async function POST(req: Request) {
   }
   if (body.messages[0].role !== "user") return error(400, "The conversation must start with a user message.");
 
-  const client = new Anthropic();
   try {
-    const response = await client.beta.messages.create({
-      model: MODEL,
-      max_tokens: 16000,
-      system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-      tools: TOOLS,
-      tool_choice: { type: "auto" },
-      messages: body.messages as Anthropic.Beta.BetaMessageParam[],
-      ...(SUPPORTS_EFFORT ? { output_config: { effort: "medium" as const } } : {}),
-      ...(SUPPORTS_FALLBACK ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
-    });
-    return Response.json({
-      content: response.content,
-      stop_reason: response.stop_reason,
-      stop_details: response.stop_details ?? null,
-      model: response.model,
-      usage: response.usage,
-    });
+    const messages = body.messages as ConvMessage[];
+    const out = cfg.provider === "gemini" ? await callGemini(messages, cfg.model) : await callAnthropic(messages, cfg.model);
+    return Response.json({ ...out, provider: cfg.provider, label: cfg.label });
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) return error(502, "The server's Anthropic API key was rejected.");
-    if (err instanceof Anthropic.RateLimitError) return error(429, "Rate limited by the Anthropic API — try again in a moment.");
-    if (err instanceof Anthropic.BadRequestError) return error(400, `Claude rejected the request: ${err.message}`);
-    if (err instanceof Anthropic.APIConnectionError) return error(503, "Could not reach the Anthropic API.");
-    if (err instanceof Anthropic.APIError) return error(err.status ?? 502, `Anthropic API error: ${err.message}`);
+    if (err instanceof ProviderError) return error(err.status, err.message);
     return error(500, err instanceof Error ? err.message : "Unknown error");
   }
 }
