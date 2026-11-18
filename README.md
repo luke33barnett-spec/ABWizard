@@ -55,6 +55,8 @@ npm run build
 2. Under **Settings → Environment Variables**, optionally set `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY`) and `ABWIZARD_ACCESS_CODE`, then **redeploy**. Vercel applies variables only to new deployments.
 3. Check `https://<your-site>/api/analyze`. It shows which provider and model are active.
 
+`/api/analyze` sets `maxDuration = 300`, which is Vercel's default and maximum on Hobby with **Fluid compute**, on by default for new projects. If a deploy fails with a `maxDuration` error, turn on Fluid compute under **Settings → Functions**.
+
 The DuckDB-WASM bundles are copied from `node_modules` during `postinstall`/`prebuild`, so nothing large is committed.
 
 ## Data notes

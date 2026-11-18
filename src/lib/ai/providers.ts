@@ -1,6 +1,6 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
-import { ApiError, FunctionCallingConfigMode, GoogleGenAI } from "@google/genai";
+import { ApiError, FunctionCallingConfigMode, GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { SYSTEM_PROMPT, TOOL_SPECS } from "@/lib/ai/prompt";
 import { fromGeminiResponse, toGeminiContents, type ConvMessage, type NeutralResponse } from "@/lib/ai/gemini-translate";
 
@@ -102,8 +102,26 @@ const GEMINI_DECLARATIONS = TOOL_SPECS.map((t) => ({ name: t.name, description: 
 
 /** Tried in order when the main model is overloaded or rate limited (first turn of a conversation only). */
 const DEFAULT_GEMINI_FALLBACKS = "gemini-3.7-flash,gemini-flash-lite-latest";
-/** Stay well under the route's 60 s maxDuration, including the model's own time. */
-const GEMINI_BUDGET_MS = 45_000;
+/** Whole retry/fallback chain for one turn (well under the route's 300 s maxDuration), and the
+ *  limit for one request to one model — a model that hangs past it is abandoned for the next one. */
+const DEFAULT_GEMINI_BUDGET_MS = 110_000;
+const DEFAULT_GEMINI_ATTEMPT_TIMEOUT_MS = 40_000;
+const THINKING_LEVELS: Record<string, ThinkingLevel> = {
+  minimal: ThinkingLevel.MINIMAL,
+  low: ThinkingLevel.LOW,
+  medium: ThinkingLevel.MEDIUM,
+  high: ThinkingLevel.HIGH,
+};
+
+/** LOW by default: plenty for writing SQL and much faster. "default" leaves it to the model. */
+function geminiThinkingLevel(): ThinkingLevel | null {
+  const v = (process.env.GEMINI_THINKING_LEVEL ?? "low").trim().toLowerCase();
+  return THINKING_LEVELS[v] ?? null;
+}
+
+function isTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+}
 const OVERLOADED = new Set([500, 502, 503, 504]);
 
 function geminiFallbacks(primary: string): string[] {
@@ -142,12 +160,16 @@ export async function callGemini(messages: ConvMessage[], model: string): Promis
   const contents = toGeminiContents(messages);
   const started = Date.now();
   const baseDelay = Number(process.env.GEMINI_RETRY_BASE_MS ?? 900);
+  const GEMINI_BUDGET_MS = Number(process.env.GEMINI_BUDGET_MS ?? DEFAULT_GEMINI_BUDGET_MS);
+  const GEMINI_ATTEMPT_TIMEOUT_MS = Number(process.env.GEMINI_ATTEMPT_TIMEOUT_MS ?? DEFAULT_GEMINI_ATTEMPT_TIMEOUT_MS);
   const pinned = pinnedGeminiModel(messages);
   // A conversation stays on the model that started it; a new question may fall back.
   const candidates = pinned ? [pinned] : [model, ...geminiFallbacks(model)];
   const tried: string[] = [];
+  const level = geminiThinkingLevel();
+  const noThinking = new Set<string>(); // models that rejected thinkingConfig
 
-  const request = (m: string) =>
+  const request = (m: string, timeoutMs: number) =>
     ai.models.generateContent({
       model: m,
       contents,
@@ -158,23 +180,38 @@ export async function callGemini(messages: ConvMessage[], model: string): Promis
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY } },
         automaticFunctionCalling: { disable: true },
         maxOutputTokens: 16000,
+        ...(level && !noThinking.has(m) ? { thinkingConfig: { thinkingLevel: level } } : {}),
+        httpOptions: { timeout: timeoutMs },
       },
     });
 
   for (const [ci, m] of candidates.entries()) {
     const attempts = ci === 0 ? 3 : 2;
+    const perAttempt = ci === 0 ? GEMINI_ATTEMPT_TIMEOUT_MS : Math.min(GEMINI_ATTEMPT_TIMEOUT_MS, 30_000);
     for (let attempt = 0; attempt < attempts; attempt++) {
+      const remaining = GEMINI_BUDGET_MS - (Date.now() - started);
+      if (remaining < 3_000) break;
+      const timeoutMs = Math.min(perAttempt, remaining);
       try {
-        let out = fromGeminiResponse(await request(m), m, () => `gemini_call_${crypto.randomUUID()}`);
+        let out = fromGeminiResponse(await request(m, timeoutMs), m, () => `gemini_call_${crypto.randomUUID()}`);
         // A malformed function call is usually transient — retry once before failing.
-        if (out.stop_reason === "malformed_tool_call") out = fromGeminiResponse(await request(m), m, () => `gemini_call_${crypto.randomUUID()}`);
+        if (out.stop_reason === "malformed_tool_call") out = fromGeminiResponse(await request(m, timeoutMs), m, () => `gemini_call_${crypto.randomUUID()}`);
         if (out.stop_reason === "malformed_tool_call") throw new ProviderError(502, "Gemini returned a malformed tool call twice. Try rephrasing the question.");
         return out;
       } catch (err) {
         if (err instanceof ProviderError) throw err;
+        if (isTimeout(err)) {
+          tried.push(`${m} (no reply in ${Math.round(timeoutMs / 1000)}s)`);
+          break; // a model that is this slow right now won't get faster on retry — try the next one
+        }
         if (err instanceof TypeError) throw new ProviderError(503, "Could not reach the Gemini API.");
         if (!(err instanceof ApiError)) throw err;
         const text = apiErrorText(err);
+        if (err.status === 400 && /thinking/i.test(text) && !noThinking.has(m)) {
+          noThinking.add(m); // this model doesn't take a thinking level — retry it without one
+          attempt--;
+          continue;
+        }
         if (/api[_ ]?key/i.test(text) && (err.status === 400 || err.status === 401 || err.status === 403)) throw new ProviderError(502, "The server's Gemini API key was rejected.");
         if (err.status === 404) {
           if (ci === 0 && !pinned) throw new ProviderError(400, `Gemini model "${m}" was not found. Check GEMINI_MODEL.`);
@@ -200,10 +237,13 @@ export async function callGemini(messages: ConvMessage[], model: string): Promis
     if (Date.now() - started > GEMINI_BUDGET_MS) break;
   }
   const rateLimited = tried.length > 0 && tried.every((t) => t.endsWith("(rate limited)"));
+  const slow = tried.length > 0 && tried.every((t) => t.includes("no reply"));
   throw new ProviderError(
-    rateLimited ? 429 : 503,
+    rateLimited ? 429 : slow ? 504 : 503,
     rateLimited
       ? `Gemini rate limit reached (${tried.join(", ")}). Wait a minute and try again.`
-      : `Gemini is overloaded right now — Google returned "high demand" for ${tried.join(", ") || model}. This usually clears within a minute; try again.`,
+      : slow
+        ? `Gemini didn't reply in time (${tried.join(", ")}). Google's servers are slow right now; try again in a minute.`
+        : `Gemini is overloaded right now (${tried.join(", ") || model}). This usually clears within a minute; try again.`,
   );
 }

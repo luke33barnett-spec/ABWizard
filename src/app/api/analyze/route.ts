@@ -10,7 +10,9 @@ import type { ConvMessage } from "@/lib/ai/gemini-translate";
  * + tools, and return the assistant turn. run_sql calls execute client-side in
  * DuckDB-WASM.
  */
-export const maxDuration = 60;
+// Vercel's current default and Hobby maximum (Fluid compute). A slow or overloaded AI
+// provider must never be cut off by the platform — providers.ts keeps its own budget below this.
+export const maxDuration = 300;
 
 const MAX_BODY_BYTES = 600_000;
 

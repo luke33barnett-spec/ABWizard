@@ -138,7 +138,13 @@ export async function askAI(opts: {
       throw new AskError("Could not reach the server.", 0);
     }
     const data = (await res.json().catch(() => ({}))) as { content?: Block[]; stop_reason?: string; model?: string; label?: string; error?: string };
-    if (!res.ok || !data.content) throw new AskError(data.error ?? `Analyze request failed (${res.status})`, res.ok ? 502 : res.status);
+    if (!res.ok || !data.content) {
+      const fallback =
+        res.status === 504
+          ? "The server stopped waiting for the AI (time limit reached)."
+          : `Analyze request failed (${res.status}).`;
+      throw new AskError(data.error ?? fallback, res.ok ? 502 : res.status);
+    }
     model = data.model;
     provider = data.label;
     if (data.stop_reason === "refusal") throw new Error(`${provider ?? "The AI"} declined this request. Try rephrasing the question.`);

@@ -101,7 +101,7 @@ async function main() {
   // ---------------------------------------------------------------- SDK + route, fetch stubbed
   type Captured = { url: string; headers: Record<string, string>; body: Record<string, unknown> };
   const captured: Captured[] = [];
-  const queue: { status: number; json: unknown }[] = [];
+  const queue: { status: number; json: unknown; delayMs?: number }[] = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -111,6 +111,16 @@ async function main() {
     captured.push({ url, headers, body: JSON.parse(bodyText || "{}") });
     const next = queue.shift();
     if (!next) throw new Error(`unexpected fetch to ${url}`);
+    if (next.delayMs) {
+      // A stuck request: resolves late unless the SDK aborts it first (its per-request timeout).
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, next.delayMs);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(new DOMException("This operation was aborted", "AbortError"));
+        });
+      });
+    }
     return new Response(JSON.stringify(next.json), { status: next.status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
 
@@ -134,6 +144,8 @@ async function main() {
     assert.ok(body.tools[0].functionDeclarations[0].parametersJsonSchema, "uses JSON Schema declarations");
     assert.equal(body.toolConfig.functionCallingConfig.mode, "ANY");
     assert.match(body.systemInstruction.parts[0].text, /You are ABWizard/);
+    const gen = (req.body as { generationConfig?: { thinkingConfig?: { thinkingLevel?: string } } }).generationConfig;
+    assert.equal(gen?.thinkingConfig?.thinkingLevel, "LOW", "low thinking level keeps Gemini fast");
     assert.equal((firstTurn.provider as string), "gemini");
     assert.equal(firstTurn.stop_reason, "tool_use");
   });
@@ -255,6 +267,37 @@ async function main() {
   });
 
   await check("route → rate limit on every model maps to 429", () => errCase(429, "Resource exhausted", 429, /rate limit reached/, 3));
+
+  // ---- slow models: per-attempt timeout, then the next model; never a bare platform 504
+  process.env.GEMINI_ATTEMPT_TIMEOUT_MS = "150";
+  await check("A model that hangs is abandoned after its timeout → next model answers", async () => {
+    const n = captured.length;
+    queue.push({ ...ok(), delayMs: 2_000 }, ok());
+    const t0 = Date.now();
+    const res = await post([{ role: "user", content: "q" }]);
+    assert.equal(res.status, 200);
+    assert.deepEqual(urlsSince(n), ["gemini-3.8-flash", "gemini-3.7-flash"]);
+    assert.ok(Date.now() - t0 < 1_500, `took ${Date.now() - t0}ms`);
+  });
+
+  await check("Every model hangs → readable 504 from the app, inside the budget", async () => {
+    queue.push({ ...ok(), delayMs: 2_000 }, { ...ok(), delayMs: 2_000 }, { ...ok(), delayMs: 2_000 });
+    const res = await post([{ role: "user", content: "q" }]);
+    const j = (await res.json()) as { error: string };
+    assert.equal(res.status, 504);
+    assert.match(j.error, /didn't reply in time/);
+  });
+  delete process.env.GEMINI_ATTEMPT_TIMEOUT_MS;
+
+  await check("A model that rejects the thinking level is retried without it", async () => {
+    const n = captured.length;
+    queue.push({ status: 400, json: { error: { code: 400, message: "Thinking level is not supported for this model.", status: "INVALID_ARGUMENT" } } }, ok());
+    const res = await post([{ role: "user", content: "q" }]);
+    assert.equal(res.status, 200);
+    const bodies = captured.slice(n).map((c) => (c.body as { generationConfig?: { thinkingConfig?: unknown } }).generationConfig?.thinkingConfig);
+    assert.ok(bodies[0], "first try sends thinkingConfig");
+    assert.equal(bodies[1], undefined, "retry omits it");
+  });
 
   await check("route → access code enforced when set", async () => {
     process.env.ABWIZARD_ACCESS_CODE = "tide";
